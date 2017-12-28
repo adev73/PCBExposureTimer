@@ -1,0 +1,10 @@
+Encoder EC12D1524406
+--------------------
+
+As wired for testing:
+
+A	Green
+B	Blue
+C	Yellow
+SW1	White
+SW2	Orange
