@@ -74,17 +74,47 @@ bool _encoderIgnore = false;  // Set to true to ignore encoder until the reading
  */
 // Pins
 #define DisplayData   5
-#define DisplayLatch  6
-#define DisplayClock  7
+#define DisplayClock  6
+#define DisplayLatch  7
 
 // Control variables
 // Note that to save variable space, we'll use time offsets from a known marker
 unsigned long displayTime = 0;  // Store the time we last did something with the display
-byte displayState = 0;          // Bitmap as follows:
-                                // Bits 0,1 = the digit to display (0->3)
-                                // Bit 2 = flash enable
-                                // Bit 3 = display on/off (when flashing; otherwise ignored)
-                                // Bits 4-7 = flash delay count, 0-63.
+byte displayDigit = 0;          // 0-3, selects the digit we're outputting at the time.
+byte lampState = 0;             // Bitmap as follows:
+                                //  Bit 0 = ready
+                                //  Bit 1 = run
+                                //  Bit 2 = pause
+                                //  Bit 3 = Finished
+                                //  Bit 4 = Time Set
+                                //  Bit 5 = TBB Set
+                                //  Bit 6 = Top Panel
+                                //  Bit 7 = Bottom Panel
+
+byte control = B00000011;       // More bitmapping....
+                                //  Bits 0-5 = future expansion
+                                //  Bit 6 = top panel enabled
+                                //  Bit 7 = bottom panel enabled
+
+// A bumch of constants representing the bit patterns of each digit
+// Segments are ABCDEFG: This may need to be reversed if I've wired it wrong. Which I probably have...
+// Colon is ignored (kinda). It will be set at runtime by the colon condition.
+// Also... 1=OFF, 0=ON.
+//               ABCDEFG:
+#define digit_0 B00000010 //ABCDEF
+#define digit_1 B10011110 // BC
+#define digit_2 B00100100 //AB DE G
+#define digit_3 B00001100 //ABCD  G
+#define digit_4 B10011000 // BC  FG
+#define digit_5 B01001000 //A CD FG
+#define digit_6 B01000000 //A CDEFG
+#define digit_7 B00011110 //ABC    
+#define digit_8 B00000000 //ABCDEFG
+#define digit_9 B00001000 //ABCD FG
+#define digit_E B01100000 //A  DEFG
+
+// The four actual time digits
+byte digit[4];
 
 /*
  * Other global program variables
@@ -101,6 +131,9 @@ void setup() {
   // Enable serial output for testing purposes
   Serial.begin(38400);
   Serial.println("Encoder Testing.");
+
+  // Temporarily stuff some test data into the EEPROM
+  EEPROM.put(0,3417);
 
   // Set up the encoder pins
   pinMode(EncoderA,INPUT);
@@ -128,9 +161,12 @@ void setup() {
     setTime = 150;          //2m30s = 150s
     EEPROM.put(0,setTime);
   } else {
+    String myTime = fancyTime(setTime);
     Serial.print("EPROM sets time to ");
-    Serial.println(fancyTime(setTime));
+    Serial.println(myTime);
   }
+
+  refTime=micros();
   
   Serial.println("Preparation complete. You may now putten das fingers into das springenworkz und twiddle de knobs");
 }
@@ -138,6 +174,10 @@ void setup() {
 void loop() {
 
   if(nextState != currentState) {
+    Serial.print("State is currently ");
+    Serial.print(currentState);
+    Serial.print(", and is changing to ");
+    Serial.println(nextState);
     switch(nextState) {
       case RESET:
         // Moving into reset state. Nothing to do here.
@@ -152,16 +192,43 @@ void loop() {
         if(encoderA != encoderB) {
           _encoderIgnore = true;
         }
-
+        break;
+      case READY:
+        // Nothing to do here for the moment
+        currentState = nextState;
+        break;
     }
   }
 
+  unsigned long now = micros();
+
   switch(currentState) {
     case RESET:
+      Serial.println("State is now RESET");
+      timeLeft = setTime;     // Set the time to whatever setTime is.
+      lampState = B10000000;  // Lamp State = all off(?)
+      refreshDisplay();       // Initialise the display
+      displayTime = now;
+      nextState = READY;      // Prepare to move to the next state.
+      break;
+    case READY:
+      if (now - displayTime > 3500) {
+        displayTime = micros();
+        displayDigit += 1;
+        if (displayDigit > 3) displayDigit = 0;
+        refreshDisplay();
+        displayTime = now;
+      }
+      if (now - refTime > 5000000) {
+        refTime = now;
+        Serial.println("5 seconds elapsed.");
+      }
       break;
     case RUN:
+      Serial.println("State is now RUN");
       break;
     case PAUSE:
+      Serial.println("State is now PAUSE");
       break;
     case FINISH_BUZZER:
       break;
@@ -171,6 +238,41 @@ void loop() {
       readEncoder();
       break;
   }
+}
+
+void refreshDisplay() {
+  // Called every 1000 uSec. Push 3 bytes out to the '595 units, as follows:
+  // Byte 1: State LEDs.
+  // Byte 2: Segments to display for the current digit
+  // Byte 3: Display digit (Bits 0-4 control which anode is ON)
+
+  // Note that as the lamp states are common anode, as is the 7-seg
+  // display, we need to invert lampState before we display it.
+  // digit[n] is already "inverted" in the bitmask.
+
+  digitalWrite(DisplayLatch,LOW);
+
+  // We need to invert lampState
+  shiftOut(DisplayData,DisplayClock,LSBFIRST,lampState ^ 255);    // Send it backwards as well, fecking wiring.
+  shiftOut(DisplayData,DisplayClock,LSBFIRST,digit[displayDigit]);    // A pattern
+  
+  switch(displayDigit){
+    case 0:
+      shiftOut(DisplayData,DisplayClock,MSBFIRST,1);
+      break;
+    case 1:
+      shiftOut(DisplayData,DisplayClock,MSBFIRST,2);
+      break;
+    case 2:
+      shiftOut(DisplayData,DisplayClock,MSBFIRST,4);
+      break;
+    case 3:
+      shiftOut(DisplayData,DisplayClock,MSBFIRST,8);
+      break;
+  }
+  
+  digitalWrite(DisplayLatch,HIGH);
+
 }
 
 void readEncoder() {
@@ -237,11 +339,39 @@ String fancyTime(int numSec) {
   itoa(numSec / 60,mins,10);
   itoa(numSec % 60,secs,10);
   
-  String output = mins;
+  String output = "";
+  if(numSec / 60 < 10) output += "0";
+  output += mins;
   output += ":";
   if(numSec % 60 < 10) output += "0";
   output += secs;
+
+  setDigit(0,0,output);
+  setDigit(1,1,output);
+  setDigit(2,3,output);
+  setDigit(3,4,output);
   
   return output;
+}
+
+void setDigit(byte digitNo, byte strIndex, String textTime) {
+  // Pick the specified digit out of the string, convert it to an integer, and 
+  // set the digit bitmask...
+  // Wow, this is properly messy.
+  
+  Serial.print("Digit ");Serial.print(digitNo);
+  switch(textTime.charAt(strIndex)) {
+    case '0': digit[digitNo] = digit_0; Serial.print(" set to ");Serial.println(digit_0); break;
+    case '1': digit[digitNo] = digit_1; Serial.print(" set to ");Serial.println(digit_1); break;
+    case '2': digit[digitNo] = digit_2; Serial.print(" set to ");Serial.println(digit_2); break;
+    case '3': digit[digitNo] = digit_3; Serial.print(" set to ");Serial.println(digit_3); break;
+    case '4': digit[digitNo] = digit_4; Serial.print(" set to ");Serial.println(digit_4); break;
+    case '5': digit[digitNo] = digit_5; Serial.print(" set to ");Serial.println(digit_5); break;
+    case '6': digit[digitNo] = digit_6; Serial.print(" set to ");Serial.println(digit_6); break;
+    case '7': digit[digitNo] = digit_7; Serial.print(" set to ");Serial.println(digit_7); break;
+    case '8': digit[digitNo] = digit_8; Serial.print(" set to ");Serial.println(digit_8); break;
+    case '9': digit[digitNo] = digit_9; Serial.print(" set to ");Serial.println(digit_9); break;
+    default:  digit[digitNo] = digit_E; Serial.print(" set to ");Serial.println(digit_E); break;
+  }
 }
 
