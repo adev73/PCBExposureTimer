@@ -58,22 +58,34 @@ void refreshDisplay() {
 
   // We need to invert lampState
   shiftOut(DisplayData,DisplayClock,LSBFIRST,lampState ^ 255);      // Send it backwards as well, fecking wiring.
-  shiftOut(DisplayData,DisplayClock,LSBFIRST,digit[displayDigit]);  // Whatever the current display digit is.
+
+  // If the colon is ON, use the byte as we find it (colon is ON in all digit bitmaps)
+  byte disp = digit[displayDigit];
+  if (!colonOn) {
+    // If, on the other hand, the colon is OFF... we need to adjust the output
+    disp = disp | B00000001;  // That ought to do it.
+  }
+  shiftOut(DisplayData,DisplayClock,LSBFIRST,disp);  // Whatever the current display digit is.
 
   // Enable the appropriate digit on the 7-seg display
-  switch(displayDigit){
-    case 0:
-      shiftOut(DisplayData,DisplayClock,MSBFIRST,1);
-      break;
-    case 1:
-      shiftOut(DisplayData,DisplayClock,MSBFIRST,2);
-      break;
-    case 2:
-      shiftOut(DisplayData,DisplayClock,MSBFIRST,4);
-      break;
-    case 3:
-      shiftOut(DisplayData,DisplayClock,MSBFIRST,8);
-      break;
+  if (displayOn) {
+    switch(displayDigit){
+      case 0:
+        shiftOut(DisplayData,DisplayClock,MSBFIRST,1);
+        break;
+      case 1:
+        shiftOut(DisplayData,DisplayClock,MSBFIRST,2);
+        break;
+      case 2:
+        shiftOut(DisplayData,DisplayClock,MSBFIRST,4);
+        break;
+      case 3:
+        shiftOut(DisplayData,DisplayClock,MSBFIRST,8);
+        break;
+    }
+  } else {
+    // Display is off, show nothing
+    shiftOut(DisplayData,DisplayClock,MSBFIRST,0);
   }
 
   // Tell the '595s we're done, this will cause them to output the new patterns.
@@ -148,5 +160,22 @@ void setLamps(STATE systemState) {
   // Show the top/bottom panel active status too.
   byte controlMask = control & B00000011;
   lampState = lampState | controlMask;
+}
+
+void doFlashDisplay() {
+    // This is EXACTLY like doBuzzer, only without the buzzer...
+    // Every 1/2 second, switch display off & on
+  if (now - refTime > 500000) {
+    // 1/2 million microseconds = 1/2 second... time to do something
+    if (displayOn) {
+      // Switch display OFF
+      displayOn = false;
+      refTime = now;                    // Begin the wait for another second      
+    } else {
+      //Half a second of display off has passed... so switch the display back on.
+      displayOn = true;
+      refTime = now;
+    }
+  }
 }
 

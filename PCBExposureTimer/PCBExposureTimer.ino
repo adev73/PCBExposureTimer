@@ -1,7 +1,7 @@
 /* 
- *  -------------------------------------------------------------------------
+ *  ------------------------------------------------------------------------------
  *  PCB Exposure Timer Software
- *  ---------------------------
+ *  ------------------------------------------------------------------------------
  *  
  *  Target platform: Arduino Nano or Arduino Mini Pro (or plain-old Atmel
  *  '328, without all the Ardino addons.
@@ -9,7 +9,7 @@
  *  Note: This version is NOT ready for release... I'm using it to test my
  *  rotary encoder & other bits.
  *  
- *  --------------------------------------------------------------------------
+ *  ------------------------------------------------------------------------------
  *  
  *  MIT License
  *  
@@ -33,11 +33,12 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  *  
+ *  ------------------------------------------------------------------------------
 */
 #include <EEPROM.h>
 
 //Debug flag, remove to dump serial port
-#define DEBUG
+//#define DEBUG
 
 // Define state machine states
 enum STATE {
@@ -76,6 +77,11 @@ bool _encoderIgnore = false;  // Set to true to ignore encoder until the reading
 #define StartPauseSW  8
 #define ResetSW       9
 
+// Other outputs
+#define TopPanel      10
+#define BottomPanel   11
+#define Buzzer        12
+
 bool startSW = false;         // True if START/PAUSE switch is pressed
 bool resetSW = false;         // True if RESET switch is pressed
 
@@ -88,8 +94,7 @@ bool resetSW = false;         // True if RESET switch is pressed
 #define DisplayLatch  7
 
 // Control variables
-// Note that to save variable space, we'll use time offsets from a known marker
-unsigned long displayTime = 0;  // Store the time we last did something with the display
+unsigned long displayTime = 0;  // Store the time we last changed digit on the display
 byte displayDigit = 0;          // 0-3, selects the digit we're outputting at the time.
 byte lampState = B00000000;     // Bitmap as follows:
                // ^---------------  Bit 8 = ready
@@ -106,15 +111,20 @@ byte control = B00000011;       // More bitmapping....
              //       ^-----------  Bit 2 = top panel enabled
              //        ^----------  Bit 1 = bottom panel enabled
 
-/*
- * Other global program variables
- */
-unsigned int setTime = 0;       // The pre-defined duration of the timer
-unsigned int timeLeft = 0;      // Number of seconds remaining of current timer run
+bool paused = false;            // Indicates the system is paused, therefore don't re-init the timer when starting
+bool displayOn = true;          // Indicates the display is currently switched ON.
+bool colonOn = true;            // If TRUE, the colon is ON.
+
+// Time related variables
+signed int setTime = 0;         // The pre-defined duration of the timer
+signed int timeLeft = 0;        // Number of seconds remaining of current timer run
 unsigned long refTime = 0;      // Reference time (when we last decremented timeLeft)
 unsigned long now = 0;          // Time the current loop started
 
 void setup() {
+
+  // Turn the display off until we're ready
+  displayOn = false;
   
 #ifdef DEBUG
   // Enable serial output for testing purposes
@@ -128,12 +138,12 @@ void setup() {
   EEPROM.put(2,0);
 #endif
 
-  // Set up the encoder pins
+  // Set up the encoder input pins
   pinMode(EncoderA,INPUT);
   pinMode(EncoderB,INPUT);
   pinMode(EncoderSW,INPUT);
 
-  // Set up the other switches
+  // Set up the other switch input pins
   pinMode(StartPauseSW,INPUT);
   pinMode(ResetSW,INPUT);
 
@@ -141,10 +151,19 @@ void setup() {
   pinMode(DisplayData,OUTPUT);
   pinMode(DisplayLatch,OUTPUT);
   pinMode(DisplayClock,OUTPUT);
-
   digitalWrite(DisplayData,false);
   digitalWrite(DisplayLatch,false);
   digitalWrite(DisplayClock,false);
+
+  // Setup the panel control pins
+  pinMode(TopPanel,OUTPUT);
+  pinMode(BottomPanel,OUTPUT);
+  digitalWrite(TopPanel,false);
+  digitalWrite(BottomPanel,false);
+
+  // And the buzzer pin...
+  pinMode(Buzzer,OUTPUT);
+  digitalWrite(Buzzer,false);
 
   // Read the default time from the EEPROM
   EEPROM.get(0,setTime);
@@ -180,6 +199,10 @@ void setup() {
 #ifdef DEBUG
   Serial.println("Preparation complete. You may now putten das fingers into das springenworks und twiddle das knobs");
 #endif
+
+  // OK, we're done.
+  displayOn = true;
+
 }
 
 void loop() {
@@ -194,27 +217,35 @@ void loop() {
   if(nextState != currentState) {
 #ifdef DEBUG
     // Debug: Note state change on serial port.
-    Serial.print("State is currently "); Serial.print(currentState); Serial.print(", and is changing to "); Serial.println(nextState);
+    Serial.print("State is currently "); 
+    Serial.print(currentState); 
+    Serial.print(", and is changing to "); 
+    Serial.println(nextState);
 #endif
 
     // Determine where we're going, and do any setting up we might want to do before we get there.
     switch(nextState) {
       case RESET:
-        // Moving into reset state. Nothing to do here, everything's handled by the actual state code.
+//                                                                            ---------------RESET
+        // Moving into reset state. 
+        // Nothing to do here, everything's handled by the actual state code.
 #ifdef DEBUG
         Serial.println("State is changing to RESET");
 #endif
         currentState = nextState;
         break;
       case TIME_SET:
-        // Moving into time set state. Wait for the encoder button to be released before we continue though...
+//                                                                            ---------------TIME SET
+        // Moving into time set state. 
+        // Wait for the encoder button to be released before we continue though...
         doInputs();
         if (!encoderSW) {
 #ifdef DEBUG
           Serial.println("State is changing to TIME-SET");
 #endif
           prepEncoder();                  // Prepare the encoder for use.
-          setDigits(fancyTime(setTime));  // Make sure the display is showing our set time (it should be... but make sure)
+          setDigits(fancyTime(setTime));  // Make sure the display is showing 
+                                          // our set time (it should be... but make sure)
           setLamps(TIME_SET);             // Indicate our new mode
           currentState = nextState;       // All done :)
         } else {
@@ -222,6 +253,7 @@ void loop() {
         }
         break;
       case TIME_SAVE:
+//                                                                            ---------------TIME-SAVE
         // Nothing to do here for the moment
 #ifdef DEBUG
         Serial.println("State is changing to TIME-SAVE");
@@ -229,8 +261,10 @@ void loop() {
         currentState = nextState;
         break;
       case TBB_SET:
-        // Indicate our new state. Wait for the encoder switch to be released before we continue though...
+//                                                                            ---------------TBB-SET
+        // Indicate our new state. 
         doInputs();
+        // Wait for the encoder switch to be released before we continue though...
         if (!encoderSW) {
 #ifdef DEBUG
           Serial.println("State is changing to TBB-SET");
@@ -243,6 +277,7 @@ void loop() {
         }
         break;
       case TBB_SAVE:
+//                                                                            ---------------TBB-SAVE
         // Wait for encoder switch to be released before we move on
         doInputs();
         if (!encoderSW) {
@@ -255,6 +290,7 @@ void loop() {
         }
         break;
       case READY:
+//                                                                            ---------------READY
         // Nothing to do here for the moment
 #ifdef DEBUG
         Serial.println("State is changing to READY");
@@ -263,18 +299,54 @@ void loop() {
         currentState = nextState;
         break;
       case RUN:
+//                                                                            ---------------RUN
+        // Wait for the RUN button to be released before we start...
+        doInputs();
+        if (!startSW) {
 #ifdef DEBUG
-        Serial.println("State is changing to RUN");
+          Serial.println("State is changing to RUN");
 #endif
-        setLamps(RUN);
-        currentState = nextState;
+          setLamps(RUN);
+          switchPanels(true);
+          if (!paused) {
+            startTimer();  // Initialise the timer
+          } else {
+            paused = false;
+            refTime = now;  // Continue the timer from the nearest whole second
+          }
+          currentState = nextState;
+//        } else {
+//          doDisplay();    // Keep the display up to date while we wait
+        }
         break;
       case PAUSE:
-#ifdef DEBUG
-        Serial.println("State is changing to PAUSE");
-#endif
-        setLamps(PAUSE);
-        currentState = nextState;
+//                                                                            ---------------PAUSE
+        // Wait for the Start/Pause button to be released before we actually pause...
+        doInputs();
+        if (!startSW) {
+  #ifdef DEBUG
+          Serial.println("State is changing to PAUSE");
+  #endif
+          setLamps(PAUSE);
+          switchPanels(false);
+          paused = true;
+          currentState = nextState;
+        }
+        break;
+//                                                                            ---------------FINISH-BUZZER
+      case FINISH_BUZZER:
+        // OK, the timer finished & dumped us here. Prep the buzzer.
+        setLamps(FINISH_BUZZER);
+        switchPanels(false);        // Turn off the UV panels
+        startBuzzer();
+        currentState = nextState;   // Move us into the right state.
+        break;
+//                                                                            ---------------FINISH
+      case FINISH:
+        refTime = now;      // Ensure the display stays on for at least 1/2 sec...
+        displayOn = true;   // Switch it on
+        setLamps(FINISH);
+        currentState = nextState;   // Go straight to finish.
         break;
     }
   }
@@ -287,6 +359,9 @@ void loop() {
       timeLeft = setTime;             // Set the time to whatever setTime is.
       lampState = B00000000;          // Lamp State = all off
       setDigits(fancyTime(setTime));  // Setup the display
+      colonOn = true;                 // Ensure the colon is displayed
+      displayOn = true;               // Ensure the display is enabled
+      digitalWrite(Buzzer,LOW);       // Make sure the buzzer is off
       doDisplay();                    // Initialise the display
       displayTime = now;
       nextState = READY;              // Prepare to move to the next state.
@@ -303,12 +378,49 @@ void loop() {
       }
       break;
     case RUN:
+      // Check for buttons...
+      doInputs();
+      if (startSW) {
+        nextState = PAUSE;
+      }
+
+      doTimer();    // Timer is running, if it drops to zero, it will set the next-state flag.
+      doDisplay();  // Keep the display going.
+      
       break;
     case PAUSE:
+      // If we're paused, we stop doing the timer until we're ready to RUN again.
+      doInputs();
+      if (startSW) {
+        // Resume
+        nextState = RUN;
+      } else if (resetSW) {
+        // Reset
+        nextState = RESET;
+      }
+      // Keep the display running
+      doDisplay();
       break;
     case FINISH_BUZZER:
+      // Check for the reset button being pressed; if yes, then reset
+      doInputs();
+      if (resetSW) {
+        nextState = RESET;
+      } else {
+        // OK, reset isn't pressed... 
+        doBuzzer();   // ...so check to see if we've buzzed for long enough,
+        doDisplay();  // and refresh the display as required.
+      }
       break;
     case FINISH:
+      doInputs();
+      if (resetSW) {
+        nextState = RESET;
+      } else {
+        // OK, reset isn't pressed...
+        doFlashDisplay();   // ...so keep flashing the display until we hit Reset.
+        doDisplay();        // and refresh the display as required.
+      }
       break;
     case TIME_SET:
       // First read & act on the decoder      
@@ -396,6 +508,19 @@ void doInputs() {
   resetSW = digitalRead(ResetSW);
 }
 
+void switchPanels(bool On) {
+  // Turn the appropriate panel(s) on or off
+  byte mask = control & B00000011;
 
+  if (On) {
+    // Turn panels ON if they're configured
+    if (mask & 2) digitalWrite(TopPanel,HIGH);
+    if (mask & 1) digitalWrite(BottomPanel,HIGH);
+  } else {
+    // Turn panels OFF regardless
+    digitalWrite(TopPanel,LOW);
+    digitalWrite(BottomPanel,LOW);
+  }
 
+}
 
