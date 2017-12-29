@@ -1,0 +1,9 @@
+Things to purchase for PCB Exposure Box
+---------------------------------------
+24v 5A PSU.
+Glass sheet(s) * 2
+Thin wood
+Glue
+Smoked plastic sheet
+
+PCB pillar drill (or get Micromat running...)

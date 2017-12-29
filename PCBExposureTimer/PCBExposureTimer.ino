@@ -36,6 +36,9 @@
 */
 #include <EEPROM.h>
 
+//Debug flag, remove to dump serial port
+#define DEBUG
+
 // Define state machine states
 enum STATE {
   RESET,
@@ -51,7 +54,7 @@ enum STATE {
 };
 
 STATE currentState = RESET;   // Current machine state
-STATE nextState = RESET;      // May need this, may not
+STATE nextState = RESET;      // Used to prepare for next state, where required.
 
 /*
  * Variables/definitions for the rotary encoder
@@ -69,6 +72,13 @@ bool _encoderA = false;       // Previous encoder A value
 bool _encoderSW = false;      // Set to true when encoder button is pressed (until handled)
 bool _encoderIgnore = false;  // Set to true to ignore encoder until the readings are good (if encoder initialises funny)
 
+// Other inputs
+#define StartPauseSW  8
+#define ResetSW       9
+
+bool startSW = false;         // True if START/PAUSE switch is pressed
+bool resetSW = false;         // True if RESET switch is pressed
+
 /*
  * Variables/definitions for the 4-segment LED display driver
  */
@@ -81,40 +91,20 @@ bool _encoderIgnore = false;  // Set to true to ignore encoder until the reading
 // Note that to save variable space, we'll use time offsets from a known marker
 unsigned long displayTime = 0;  // Store the time we last did something with the display
 byte displayDigit = 0;          // 0-3, selects the digit we're outputting at the time.
-byte lampState = 0;             // Bitmap as follows:
-                                //  Bit 0 = ready
-                                //  Bit 1 = run
-                                //  Bit 2 = pause
-                                //  Bit 3 = Finished
-                                //  Bit 4 = Time Set
-                                //  Bit 5 = TBB Set
-                                //  Bit 6 = Top Panel
-                                //  Bit 7 = Bottom Panel
+byte lampState = B00000000;     // Bitmap as follows:
+               // ^---------------  Bit 8 = ready
+               //  ^--------------  Bit 7 = run
+               //   ^-------------  Bit 6 = pause
+               //    ^------------  Bit 5 = Finished
+               //     ^-----------  Bit 4 = Time Set
+               //      ^----------  Bit 3 = TBB Set
+               //       ^---------  Bit 2 = Top Panel
+               //        ^--------  Bit 1 = Bottom Panel
 
 byte control = B00000011;       // More bitmapping....
-                                //  Bits 0-5 = future expansion
-                                //  Bit 6 = top panel enabled
-                                //  Bit 7 = bottom panel enabled
-
-// A bumch of constants representing the bit patterns of each digit
-// Segments are ABCDEFG: This may need to be reversed if I've wired it wrong. Which I probably have...
-// Colon is ignored (kinda). It will be set at runtime by the colon condition.
-// Also... 1=OFF, 0=ON.
-//               ABCDEFG:
-#define digit_0 B00000010 //ABCDEF
-#define digit_1 B10011110 // BC
-#define digit_2 B00100100 //AB DE G
-#define digit_3 B00001100 //ABCD  G
-#define digit_4 B10011000 // BC  FG
-#define digit_5 B01001000 //A CD FG
-#define digit_6 B01000000 //A CDEFG
-#define digit_7 B00011110 //ABC    
-#define digit_8 B00000000 //ABCDEFG
-#define digit_9 B00001000 //ABCD FG
-#define digit_E B01100000 //A  DEFG
-
-// The four actual time digits
-byte digit[4];
+             // ^^^^^^------------  Bits 8-3 = future expansion
+             //       ^-----------  Bit 2 = top panel enabled
+             //        ^----------  Bit 1 = bottom panel enabled
 
 /*
  * Other global program variables
@@ -122,23 +112,30 @@ byte digit[4];
 unsigned int setTime = 0;       // The pre-defined duration of the timer
 unsigned int timeLeft = 0;      // Number of seconds remaining of current timer run
 unsigned long refTime = 0;      // Reference time (when we last decremented timeLeft)
-
-// Variables below this line are/were used for testing & shall be removed.
-signed long pos = 0;      // Position indicator
-signed long _pos = 0;     // Previous position - if different, print the new pos.
+unsigned long now = 0;          // Time the current loop started
 
 void setup() {
+  
+#ifdef DEBUG
   // Enable serial output for testing purposes
   Serial.begin(38400);
   Serial.println("Encoder Testing.");
+#endif
 
-  // Temporarily stuff some test data into the EEPROM
-  EEPROM.put(0,3417);
+#ifdef RESET_EEPROM
+  // Clear the stored EEPROM data
+  EEPROM.put(0,0);
+  EEPROM.put(2,0);
+#endif
 
   // Set up the encoder pins
   pinMode(EncoderA,INPUT);
   pinMode(EncoderB,INPUT);
   pinMode(EncoderSW,INPUT);
+
+  // Set up the other switches
+  pinMode(StartPauseSW,INPUT);
+  pinMode(ResetSW,INPUT);
 
   // Setup the display pins & reset to zero
   pinMode(DisplayData,OUTPUT);
@@ -151,227 +148,254 @@ void setup() {
 
   // Read the default time from the EEPROM
   EEPROM.get(0,setTime);
+#ifdef DEBUG
   Serial.print("Read ");
   Serial.print(setTime);
   Serial.println(" from EEPROM.");
-
+#endif
+  
   // If setTime is zero or greater than 60m, set to 2m30s and write that value to the EEPROM.
   if(setTime == 0 || setTime > 3600) {
+#ifdef DEBUG
     Serial.println("Setting EPROM value to 2m30s");
+#endif
     setTime = 150;          //2m30s = 150s
     EEPROM.put(0,setTime);
   } else {
     String myTime = fancyTime(setTime);
+#ifdef DEBUG
     Serial.print("EPROM sets time to ");
     Serial.println(myTime);
+#endif
   }
 
-  refTime=micros();
-  
-  Serial.println("Preparation complete. You may now putten das fingers into das springenworkz und twiddle de knobs");
+  // Read the top/bottom panel settings from the EEPROM
+  EEPROM.get(2,control);
+  if (control & B00000011 == 0) {
+    // Control byte not set, so set top & bottom panels to active & write the control byte
+    control = B00000011;
+    EEPROM.put(2,control);
+  }
+ 
+#ifdef DEBUG
+  Serial.println("Preparation complete. You may now putten das fingers into das springenworks und twiddle das knobs");
+#endif
 }
 
 void loop() {
 
+  // Record the time this loop started. This will be used for various purposes throughout the loop.
+  now = micros();
+
+  // Other vars.
+  char change = 0;  // Local variable used when reading the encoder
+  
+  // Determine if we're changing state
   if(nextState != currentState) {
-    Serial.print("State is currently ");
-    Serial.print(currentState);
-    Serial.print(", and is changing to ");
-    Serial.println(nextState);
+#ifdef DEBUG
+    // Debug: Note state change on serial port.
+    Serial.print("State is currently "); Serial.print(currentState); Serial.print(", and is changing to "); Serial.println(nextState);
+#endif
+
+    // Determine where we're going, and do any setting up we might want to do before we get there.
     switch(nextState) {
       case RESET:
-        // Moving into reset state. Nothing to do here.
+        // Moving into reset state. Nothing to do here, everything's handled by the actual state code.
+#ifdef DEBUG
+        Serial.println("State is changing to RESET");
+#endif
         currentState = nextState;
         break;
       case TIME_SET:
-        // Moving into time set state. Prepare the encoder.
-        encoderA = digitalRead(EncoderA);
-        encoderB = digitalRead(EncoderB);
-        _encoderA = encoderA;
-        
-        if(encoderA != encoderB) {
-          _encoderIgnore = true;
+        // Moving into time set state. Wait for the encoder button to be released before we continue though...
+        doInputs();
+        if (!encoderSW) {
+#ifdef DEBUG
+          Serial.println("State is changing to TIME-SET");
+#endif
+          prepEncoder();                  // Prepare the encoder for use.
+          setDigits(fancyTime(setTime));  // Make sure the display is showing our set time (it should be... but make sure)
+          setLamps(TIME_SET);             // Indicate our new mode
+          currentState = nextState;       // All done :)
+        } else {
+          doDisplay();  // Keep the display refreshed while we wait
+        }
+        break;
+      case TIME_SAVE:
+        // Nothing to do here for the moment
+#ifdef DEBUG
+        Serial.println("State is changing to TIME-SAVE");
+#endif
+        currentState = nextState;
+        break;
+      case TBB_SET:
+        // Indicate our new state. Wait for the encoder switch to be released before we continue though...
+        doInputs();
+        if (!encoderSW) {
+#ifdef DEBUG
+          Serial.println("State is changing to TBB-SET");
+#endif
+          prepEncoder();
+          setLamps(TBB_SET);
+          currentState = nextState; // Move on.
+        } else {
+          doDisplay();  // Keep the display refreshed
+        }
+        break;
+      case TBB_SAVE:
+        // Wait for encoder switch to be released before we move on
+        doInputs();
+        if (!encoderSW) {
+#ifdef DEBUG
+          Serial.println("State is changing to TBB-SAVE");
+#endif
+          currentState = nextState; // Move on.
+        } else {
+          doDisplay();  // Keep refreshing the display...
         }
         break;
       case READY:
         // Nothing to do here for the moment
+#ifdef DEBUG
+        Serial.println("State is changing to READY");
+#endif
+        setLamps(READY);
+        currentState = nextState;
+        break;
+      case RUN:
+#ifdef DEBUG
+        Serial.println("State is changing to RUN");
+#endif
+        setLamps(RUN);
+        currentState = nextState;
+        break;
+      case PAUSE:
+#ifdef DEBUG
+        Serial.println("State is changing to PAUSE");
+#endif
+        setLamps(PAUSE);
         currentState = nextState;
         break;
     }
   }
 
-  unsigned long now = micros();
-
   switch(currentState) {
     case RESET:
+#ifdef DEBUG
       Serial.println("State is now RESET");
-      timeLeft = setTime;     // Set the time to whatever setTime is.
-      lampState = B10000000;  // Lamp State = all off(?)
-      refreshDisplay();       // Initialise the display
+#endif
+      timeLeft = setTime;             // Set the time to whatever setTime is.
+      lampState = B00000000;          // Lamp State = all off
+      setDigits(fancyTime(setTime));  // Setup the display
+      doDisplay();                    // Initialise the display
       displayTime = now;
-      nextState = READY;      // Prepare to move to the next state.
+      nextState = READY;              // Prepare to move to the next state.
       break;
     case READY:
-      if (now - displayTime > 3500) {
-        displayTime = micros();
-        displayDigit += 1;
-        if (displayDigit > 3) displayDigit = 0;
-        refreshDisplay();
-        displayTime = now;
-      }
-      if (now - refTime > 5000000) {
-        refTime = now;
-        Serial.println("5 seconds elapsed.");
+      doDisplay();  // Update the display if required
+      doInputs();   // Read the state of all of the buttons, this will determine what (if anything) we do next
+      if (encoderSW) {
+        // Encoder switch is pressed, so move to TIME_SET mode
+        nextState = TIME_SET;
+      } else if (startSW) {
+        // Start button is pressed, so move to RUN mode
+        nextState = RUN;
       }
       break;
     case RUN:
-      Serial.println("State is now RUN");
       break;
     case PAUSE:
-      Serial.println("State is now PAUSE");
       break;
     case FINISH_BUZZER:
       break;
     case FINISH:
       break;
     case TIME_SET:
-      readEncoder();
-      break;
-  }
-}
+      // First read & act on the decoder      
+      change = readEncoder();
+      if(change != 0 ) {  // If the encoder value has changed, update the display values
+        setTime = setTime + change;
+        // Make sure the time is within bounds (1 sec to 10 mins)
+        if (setTime < 1) setTime = 1;
+        if (setTime > 3600) setTime = 3600;
 
-void refreshDisplay() {
-  // Called every 1000 uSec. Push 3 bytes out to the '595 units, as follows:
-  // Byte 1: State LEDs.
-  // Byte 2: Segments to display for the current digit
-  // Byte 3: Display digit (Bits 0-4 control which anode is ON)
-
-  // Note that as the lamp states are common anode, as is the 7-seg
-  // display, we need to invert lampState before we display it.
-  // digit[n] is already "inverted" in the bitmask.
-
-  digitalWrite(DisplayLatch,LOW);
-
-  // We need to invert lampState
-  shiftOut(DisplayData,DisplayClock,LSBFIRST,lampState ^ 255);    // Send it backwards as well, fecking wiring.
-  shiftOut(DisplayData,DisplayClock,LSBFIRST,digit[displayDigit]);    // A pattern
-  
-  switch(displayDigit){
-    case 0:
-      shiftOut(DisplayData,DisplayClock,MSBFIRST,1);
-      break;
-    case 1:
-      shiftOut(DisplayData,DisplayClock,MSBFIRST,2);
-      break;
-    case 2:
-      shiftOut(DisplayData,DisplayClock,MSBFIRST,4);
-      break;
-    case 3:
-      shiftOut(DisplayData,DisplayClock,MSBFIRST,8);
-      break;
-  }
-  
-  digitalWrite(DisplayLatch,HIGH);
-
-}
-
-void readEncoder() {
-  
-  // Read the three inputs. EncoderA = EncoderB if the encoder is in a detent.
-  encoderA = digitalRead(EncoderA);
-
-  // Debounce by repeatedly re-reading until things are stable...
-  bool done;
-  do {
-    done = true;
-    delayMicroseconds(10);  // Doze for 10uS just to be sure to be sure
-    if (digitalRead(EncoderA) != encoderA) {done = false; encoderA = digitalRead(EncoderA);}
-  } while (!done);
-
-  encoderB = digitalRead(EncoderB);
-  encoderSW = digitalRead(EncoderSW);
-
-  // If the encoder is not yet known to be stabilised at an indent, check now.
-  if (_encoderIgnore) {
-    if (encoderA == encoderB) {
-      // OK, that's near enough.
-      _encoderIgnore = false;
-      _encoderA = encoderA;
-    } 
-  } else {
-    // Has sigA changed since we last read it??
-    if (encoderA != _encoderA) {
-      // Change! But in which direction?
-      if (encoderA == encoderB) {
-        // Clockwise, add
-        pos++;
-      } else {
-        // Anticlockwise, subtract
-        pos--;
+        // Load our new set time into the display
+        setDigits(fancyTime(setTime));
       }
-      _encoderA = encoderA;
-    }
+      
+      doInputs();   // Read the state of all of the buttons, this will determine what (if anything) we do next
+      if(encoderSW) {
+        // User pressed the encoder, so save the current value & move to the next mode
+        nextState=TIME_SAVE;
+      } else if(resetSW) {
+        // User cancelled changes by pressing the reset button; so re-read the stored time & return to READY
+        EEPROM.get(0,setTime);
+        setDigits(fancyTime(setTime));
+        nextState = READY;
+      }
 
-    if (encoderSW != _encoderSW) {
-      // Button state change. Make a note of this
-      _encoderSW = encoderSW;
+      // Finally refresh the display, if it's time
+      doDisplay();
+
+      break;
+    case TIME_SAVE:
+      // Store the currently set time & move to the TBB state
+      EEPROM.put(0,setTime);
+      nextState = TBB_SET;
+      break;
+    case TBB_SET:
+      // Read the encoder, change the settings as required.
+      change = readEncoder();
+      if (change != 0) {
+        byte panels = control & B00000011;
+        switch(panels) {
+          case 0: // Impossible case, treat it as 1
+          case 1: // BOTTOM panel active only. +ve change makes TOP panel active, negative makes BOTH panels active
+            if (change > 0) panels = B00000010; else panels = B00000011;
+            break;
+          case 2: // TOP panel active only. +ve change makes BOTH panels active, negative makes BOTTOM panel active
+            if (change > 0) panels = B00000011; else panels = B00000001;
+            break;
+          case 3: // BOTH panels active. +ve change makes BOTTOM panel active, negative makes TOP panel active
+            if (change > 0) panels = B00000001; else panels = B00000010;
+            break;
+        }
+        byte mask = control & B11111100;
+        control = control & mask;   // Clear panel state
+        control = control | panels; // Set panel state
+        setLamps(TBB_SET);  // Update the active panel(s) indicators
+                            // Note that the lamps will lag by up to DISPLAY_REFRESH_TIME microseconds. 
+                            // I reckon we can live with this
+      }
+
+      doInputs();
       if (encoderSW) {
-        Serial.println("Encoder button pwessed");
-      } else {
-        Serial.println("Encoder button weleased");
+        // User's finished messing about, save state
+        nextState = TBB_SAVE;
+      } else if (resetSW) {
+        // User's canceled changes, re-load control byte from EEPROM.
+        EEPROM.get(2,control);
+        nextState = READY;
       }
-    }
 
-    // Encoder testing... dump to serial port
-    if (_pos != pos) {
-      _pos = pos;
-      Serial.print("New encoder value: ");
-      Serial.println(pos);
-    }
+      // Finally refresh the display, if it's time
+      doDisplay();
+      break;
+    case TBB_SAVE:
+      // Store the new value of the control byte into the EPROM
+      EEPROM.put(2,control);             // Store the new value
+      nextState = READY;                // Return to ready state.
+      break;
   }
 }
 
-String fancyTime(int numSec) {
-  // Convert number of seconds to MM:SS format
-  char mins[3];
-  char secs[3];
-  
-  itoa(numSec / 60,mins,10);
-  itoa(numSec % 60,secs,10);
-  
-  String output = "";
-  if(numSec / 60 < 10) output += "0";
-  output += mins;
-  output += ":";
-  if(numSec % 60 < 10) output += "0";
-  output += secs;
-
-  setDigit(0,0,output);
-  setDigit(1,1,output);
-  setDigit(2,3,output);
-  setDigit(3,4,output);
-  
-  return output;
+void doInputs() {
+  // Read the switche states into their variables
+  encoderSW = digitalRead(EncoderSW);
+  startSW = digitalRead(StartPauseSW);
+  resetSW = digitalRead(ResetSW);
 }
 
-void setDigit(byte digitNo, byte strIndex, String textTime) {
-  // Pick the specified digit out of the string, convert it to an integer, and 
-  // set the digit bitmask...
-  // Wow, this is properly messy.
-  
-  Serial.print("Digit ");Serial.print(digitNo);
-  switch(textTime.charAt(strIndex)) {
-    case '0': digit[digitNo] = digit_0; Serial.print(" set to ");Serial.println(digit_0); break;
-    case '1': digit[digitNo] = digit_1; Serial.print(" set to ");Serial.println(digit_1); break;
-    case '2': digit[digitNo] = digit_2; Serial.print(" set to ");Serial.println(digit_2); break;
-    case '3': digit[digitNo] = digit_3; Serial.print(" set to ");Serial.println(digit_3); break;
-    case '4': digit[digitNo] = digit_4; Serial.print(" set to ");Serial.println(digit_4); break;
-    case '5': digit[digitNo] = digit_5; Serial.print(" set to ");Serial.println(digit_5); break;
-    case '6': digit[digitNo] = digit_6; Serial.print(" set to ");Serial.println(digit_6); break;
-    case '7': digit[digitNo] = digit_7; Serial.print(" set to ");Serial.println(digit_7); break;
-    case '8': digit[digitNo] = digit_8; Serial.print(" set to ");Serial.println(digit_8); break;
-    case '9': digit[digitNo] = digit_9; Serial.print(" set to ");Serial.println(digit_9); break;
-    default:  digit[digitNo] = digit_E; Serial.print(" set to ");Serial.println(digit_E); break;
-  }
-}
+
+
 
