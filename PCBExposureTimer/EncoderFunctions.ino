@@ -61,12 +61,12 @@ byte readEncoder() {
       }
       _encoderA = encoderA;
     }
-
+  
 #ifdef DEBUG
     // Encoder testing... dump to serial port
     if (pos != 0) {
       Serial.print("New encoder value: ");
-      Serial.println(pos);
+      Serial.println(pos,DEC);
     }
 #endif
   }

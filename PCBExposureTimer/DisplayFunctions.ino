@@ -11,21 +11,20 @@
 
 #define DISPLAY_REFRESH_TIME  3500
 
-// Digit bitmaps. Note that these are inverted (0=ON, 1=OFF) because the 7-seg
-// displays are common anode, and our 74'595 is connected to the cathode of the LED.
-// Segments:     ABCDEFG: (we're ignoring the colon)
-#define digit__ B11111110 //All off (blank)
-#define digit_0 B00000010 //ABCDEF
-#define digit_1 B10011110 // BC
-#define digit_2 B00100100 //AB DE G
-#define digit_3 B00001100 //ABCD  G
-#define digit_4 B10011000 // BC  FG
-#define digit_5 B01001000 //A CD FG
-#define digit_6 B01000000 //A CDEFG
-#define digit_7 B00011110 //ABC    
-#define digit_8 B00000000 //ABCDEFG
-#define digit_9 B00001000 //ABCD FG
-#define digit_E B01100000 //A  DEFG
+// Digit bitmaps. 1=segment ON, 0 = OFF.
+// Segments:     ABCDEFG: (we're ignoring the colon, that's handled separately)
+#define digit__ B00000000 //All off (blank)
+#define digit_0 B11111100 //ABCDEF
+#define digit_1 B01100000 // BC
+#define digit_2 B11011010 //AB DE G
+#define digit_3 B11110010 //ABCD  G
+#define digit_4 B01100110 // BC  FG
+#define digit_5 B10110110 //A CD FG
+#define digit_6 B10111110 //A CDEFG
+#define digit_7 B11100000 //ABC    
+#define digit_8 B11111110 //ABCDEFG
+#define digit_9 B11110110 //ABCD FG
+#define digit_E B10011110 //A  DEFG
 
 // Storage for the four digits we wish to display right now
 byte digit[4];
@@ -63,6 +62,8 @@ void refreshDisplay() {
   byte disp = digit[displayDigit];
   if (!colonOn) {
     // If, on the other hand, the colon is OFF... we need to adjust the output
+    disp = disp & B11111110;  // That ought to do it.
+  } else {
     disp = disp | B00000001;  // That ought to do it.
   }
   shiftOut(DisplayData,DisplayClock,LSBFIRST,disp);  // Whatever the current display digit is.
@@ -71,21 +72,21 @@ void refreshDisplay() {
   if (displayOn) {
     switch(displayDigit){
       case 0:
-        shiftOut(DisplayData,DisplayClock,MSBFIRST,1);
+        shiftOut(DisplayData,DisplayClock,MSBFIRST,1 ^ B11111111);
         break;
       case 1:
-        shiftOut(DisplayData,DisplayClock,MSBFIRST,2);
+        shiftOut(DisplayData,DisplayClock,MSBFIRST,2 ^ B11111111);
         break;
       case 2:
-        shiftOut(DisplayData,DisplayClock,MSBFIRST,4);
+        shiftOut(DisplayData,DisplayClock,MSBFIRST,4 ^ B11111111);
         break;
       case 3:
-        shiftOut(DisplayData,DisplayClock,MSBFIRST,8);
+        shiftOut(DisplayData,DisplayClock,MSBFIRST,8 ^ B11111111);
         break;
     }
   } else {
     // Display is off, show nothing
-    shiftOut(DisplayData,DisplayClock,MSBFIRST,0);
+    shiftOut(DisplayData,DisplayClock,MSBFIRST,255);
   }
 
   // Tell the '595s we're done, this will cause them to output the new patterns.

@@ -39,6 +39,7 @@
 
 //Debug flag, remove to dump serial port
 //#define DEBUG
+//#define RESET_EEPROM
 
 // Define state machine states
 enum STATE {
@@ -174,7 +175,7 @@ void setup() {
 #endif
   
   // If setTime is zero or greater than 60m, set to 2m30s and write that value to the EEPROM.
-  if(setTime == 0 || setTime > 3600) {
+  if(setTime <= 0 || setTime > 3600) {
 #ifdef DEBUG
     Serial.println("Setting EPROM value to 2m30s");
 #endif
@@ -190,7 +191,7 @@ void setup() {
 
   // Read the top/bottom panel settings from the EEPROM
   EEPROM.get(2,control);
-  if (control & B00000011 == 0) {
+  if ((control & B00000011) == 0) {
     // Control byte not set, so set top & bottom panels to active & write the control byte
     control = B00000011;
     EEPROM.put(2,control);
@@ -304,7 +305,8 @@ void loop() {
         doInputs();
         if (!startSW) {
 #ifdef DEBUG
-          Serial.println("State is changing to RUN");
+          Serial.print("State is changing to RUN, setTime is: ");
+          Serial.println(setTime);
 #endif
           setLamps(RUN);
           switchPanels(true);
@@ -356,6 +358,7 @@ void loop() {
 #ifdef DEBUG
       Serial.println("State is now RESET");
 #endif
+      paused = false;                 // We're not paused any more
       timeLeft = setTime;             // Set the time to whatever setTime is.
       lampState = B00000000;          // Lamp State = all off
       setDigits(fancyTime(setTime));  // Setup the display
