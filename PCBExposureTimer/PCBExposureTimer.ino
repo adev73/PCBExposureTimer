@@ -427,7 +427,7 @@ void loop() {
       break;
     case TIME_SET:
       // First read & act on the decoder      
-      change = readEncoder();
+      change = readEncoder(true);
       if(change != 0 ) {  // If the encoder value has changed, update the display values
         setTime = setTime + change;
         // Make sure the time is within bounds (1 sec to 10 mins)
@@ -460,7 +460,7 @@ void loop() {
       break;
     case TBB_SET:
       // Read the encoder, change the settings as required.
-      change = readEncoder();
+      change = readEncoder(false);
       if (change != 0) {
         byte panels = control & B00000011;
         switch(panels) {

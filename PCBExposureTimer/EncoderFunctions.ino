@@ -6,6 +6,11 @@
 //              depending on whether it moved clockwise or anticlockwise.
 //              When we're using the encoder, this routine is called as often as possible.
 
+#define FAST        25000   // Number of uSec between encoder pulses to consider accelerating
+#define FASTER      10000   // As above for super-acceleration
+#define BIGSTEP        10   // Number of steps to jump when accelerated
+#define BIGGERSTEP     60   // As above for super-turbo mode
+
 void prepEncoder() {
   //
   // Prepare the encoder for use
@@ -19,13 +24,15 @@ void prepEncoder() {
   }
 }
 
-byte readEncoder() {
+byte readEncoder(bool withAcceleration) {
   //
   // Reads a rotary encoder & determines 1) if it's moved, and 2) if so, in which direction.
   // We could add acceleration too... but I can't be bothered for this application.
   //
-
-  char pos = 0; // Note the new position (-1 = CCW one notch, 0 = no movement, +1 = CW one notch.
+  static unsigned long lastChange = micros(); // Use this to determine the speed the encoder is going
+  
+  char pos = 0; // Note the new position (-moveBy = CCW one notch, 0 = no movement, +moveBy = CW one notch.
+  byte moveBy = 1; // Variable to handle acceleration
   
   // Read the three inputs. EncoderA = EncoderB if the encoder is in a detent.
   encoderA = digitalRead(EncoderA);
@@ -51,15 +58,26 @@ byte readEncoder() {
   } else {
     // Has sigA changed since we last read it??
     if (encoderA != _encoderA) {
-      // Change! But in which direction?
+      // Change! How fast? (if acceleration is enabled)
+      if (withAcceleration) {
+        if (now-lastChange < FASTER) { 
+          // Super-Quickly!
+          moveBy = BIGGERSTEP;
+        } else if (now - lastChange < FAST) { 
+          // Plain old quickly
+          moveBy = BIGSTEP;
+        }
+      }
+      //...amd in which direction?
       if (encoderA == encoderB) {
         // Clockwise, add
-        pos++;
+        pos = pos + moveBy;
       } else {
         // Anticlockwise, subtract
-        pos--;
+        pos = pos - moveBy;
       }
       _encoderA = encoderA;
+      lastChange = micros();
     }
   
 #ifdef DEBUG
